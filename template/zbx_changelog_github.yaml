@@ -1,0 +1,464 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: d927dabef16744e28c5a09218c7a99e2
+      template: 'Zabbix ChangeLog by GitHub'
+      name: 'Zabbix ChangeLog by GitHub'
+      description: |
+        Monitors the ChangeLog of the Zabbix source repository on GitHub and raises a problem when it changes or when a new version section appears.
+        
+        Setup:
+        1. Link the template to a host monitored by a Zabbix server or proxy with access to api.github.com and raw.githubusercontent.com (set {$ZBX.CHANGELOG.HTTP.PROXY} if an HTTP proxy is required).
+        2. Optional: set {$GITHUB.API.TOKEN} to a fine-grained token with read-only access to public repositories. Without a token GitHub allows 60 API requests per hour per IP address; the template uses one request per check (by default every 30 minutes).
+        3. Optional: change {$ZBX.CHANGELOG.BRANCH} to follow a release branch, for example release/8.0.
+        
+        Change triggers are closed manually, so every update stays visible until it is acknowledged.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: e76508e93c2e4262b4d6f40b8206e5a7
+          name: 'Last ChangeLog commit'
+          type: DEPENDENT
+          key: zbx.changelog.commit
+          history: 90d
+          value_type: TEXT
+          description: 'Short SHA, title and author of the latest commit that changed the ChangeLog.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var d = JSON.parse(value);
+                  return d.short_sha + ' ' + d.message + ' (' + d.author + ')';
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+          triggers:
+            - uuid: 3b873264284b4c7a8b4f49916bfbfe06
+              expression: 'change(/Zabbix ChangeLog by GitHub/zbx.changelog.commit)=1'
+              recovery_mode: NONE
+              name: 'Zabbix ChangeLog: Updated in {$ZBX.CHANGELOG.REPO}@{$ZBX.CHANGELOG.BRANCH}'
+              event_name: 'Zabbix ChangeLog updated: {ITEM.VALUE}'
+              opdata: '{?last(/Zabbix ChangeLog by GitHub/zbx.changelog.entries)} entries in {?last(/Zabbix ChangeLog by GitHub/zbx.changelog.version)}'
+              url_name: 'ChangeLog history on GitHub'
+              url: 'https://github.com/{$ZBX.CHANGELOG.REPO}/commits/{$ZBX.CHANGELOG.BRANCH}/{$ZBX.CHANGELOG.PATH}'
+              priority: INFO
+              description: 'A new commit changed the ChangeLog. Open the link to see the changes; the latest version section is collected in the "Latest version: changes" item. Close the problem manually after review.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 340232e642a64ef9ac5c41ce1e42a83e
+          name: 'Last ChangeLog commit time'
+          type: DEPENDENT
+          key: zbx.changelog.date
+          history: 90d
+          units: unixtime
+          description: 'Commit time of the latest ChangeLog change.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.date
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: ac5a67d9007a4b31917561ffa66674f6
+          name: 'Latest version: entries'
+          type: DEPENDENT
+          key: zbx.changelog.entries
+          history: 90d
+          description: 'Number of entries in the latest version section.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.entries
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: 9db3928d2d7740deb7555d8c88a51f43
+          name: 'Latest version: new features'
+          type: DEPENDENT
+          key: zbx.changelog.features
+          history: 90d
+          description: 'Number of "New features" entries in the latest version section.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.features
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: 3c3301f642a4459c8a46febe201c38db
+          name: 'Latest version: bug fixes'
+          type: DEPENDENT
+          key: zbx.changelog.fixes
+          history: 90d
+          description: 'Number of "Bug fixes" entries in the latest version section.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.fixes
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: 2e00cb6e252d4a0da5938d1ea7e3deed
+          name: 'Get ChangeLog data'
+          type: SCRIPT
+          key: zbx.changelog.get
+          delay: '{$ZBX.CHANGELOG.INTERVAL}'
+          history: 1d
+          value_type: TEXT
+          params: |
+            var params = JSON.parse(value),
+            	result = {};
+            
+            function isSet(macro_value) {
+            	return typeof macro_value === 'string' && macro_value !== '' && macro_value.indexOf('{$') !== 0;
+            }
+            
+            function getHeader(headers, name) {
+            	for (var key in headers) {
+            		if (key.toLowerCase() === name) {
+            			return Array.isArray(headers[key]) ? headers[key][0] : headers[key];
+            		}
+            	}
+            
+            	return null;
+            }
+            
+            function request(url, headers) {
+            	var req = new HttpRequest(),
+            		body;
+            
+            	req.addHeader('User-Agent: Zabbix ChangeLog monitor');
+            
+            	for (var i = 0; i < headers.length; i++) {
+            		req.addHeader(headers[i]);
+            	}
+            
+            	if (isSet(params.proxy)) {
+            		req.setProxy(params.proxy);
+            	}
+            
+            	body = req.get(url);
+            
+            	return {status: req.getStatus(), body: body, headers: req.getHeaders()};
+            }
+            
+            // Latest commit that touched the ChangeLog.
+            var api_headers = ['Accept: application/vnd.github+json', 'X-GitHub-Api-Version: 2022-11-28'];
+            
+            if (isSet(params.token)) {
+            	api_headers.push('Authorization: Bearer ' + params.token);
+            }
+            
+            var commits = request('https://api.github.com/repos/' + params.repo + '/commits?per_page=1'
+            	+ '&sha=' + encodeURIComponent(params.branch) + '&path=' + encodeURIComponent(params.path), api_headers);
+            
+            if (commits.status !== 200) {
+            	var error = '';
+            
+            	try {
+            		error = JSON.parse(commits.body).message;
+            	}
+            	catch (e) {
+            		error = commits.body.substring(0, 200);
+            	}
+            
+            	throw 'GitHub API returned HTTP ' + commits.status + ': ' + error;
+            }
+            
+            var list = JSON.parse(commits.body);
+            
+            if (!Array.isArray(list) || list.length === 0) {
+            	throw 'No commits found for "' + params.path + '" in ' + params.repo + '@' + params.branch + '.';
+            }
+            
+            var commit = list[0];
+            
+            result.sha = commit.sha;
+            result.short_sha = commit.sha.substring(0, 12);
+            result.date = Math.floor(Date.parse(commit.commit.committer.date) / 1000);
+            result.author = commit.commit.author.name;
+            result.message = commit.commit.message.split('\n')[0];
+            result.url = commit.html_url;
+            result.rate_limit_remaining = parseInt(getHeader(commits.headers, 'x-ratelimit-remaining'), 10);
+            result.rate_limit_limit = parseInt(getHeader(commits.headers, 'x-ratelimit-limit'), 10);
+            
+            // Beginning of the ChangeLog at that commit: only the latest section is needed, so a byte range is requested.
+            var raw = request('https://raw.githubusercontent.com/' + params.repo + '/' + commit.sha + '/' + params.path,
+            	['Range: bytes=0-' + (parseInt(params.bytes, 10) - 1)]);
+            
+            if (raw.status !== 200 && raw.status !== 206) {
+            	throw 'Cannot read ' + params.path + ': HTTP ' + raw.status + '.';
+            }
+            
+            var lines = raw.body.split('\n'),
+            	section = [],
+            	in_section = false,
+            	block = '';
+            
+            result.version = '';
+            result.features = 0;
+            result.fixes = 0;
+            
+            for (var i = 0; i < lines.length; i++) {
+            	var line = lines[i].replace(/\r$/, ''),
+            		header = line.match(/^Changes for (.+)$/);
+            
+            	if (header !== null) {
+            		if (in_section) {
+            			break;
+            		}
+            
+            		in_section = true;
+            		result.version = header[1].trim();
+            		continue;
+            	}
+            
+            	if (!in_section) {
+            		continue;
+            	}
+            
+            	if (/^New features:/.test(line)) {
+            		block = 'features';
+            	}
+            	else if (/^Bug fixes:/.test(line)) {
+            		block = 'fixes';
+            	}
+            	else if (/^[A-Z.]{10} \[/.test(line)) {
+            		result[block === 'fixes' ? 'fixes' : 'features']++;
+            	}
+            
+            	section.push(line);
+            }
+            
+            if (result.version === '') {
+            	throw 'Cannot find a "Changes for" section in the first ' + params.bytes + ' bytes of ' + params.path + '.';
+            }
+            
+            result.entries = result.features + result.fixes;
+            result.section = section.join('\n').trim().substring(0, 60000);
+            
+            return JSON.stringify(result);
+          description: 'Latest commit that changed the ChangeLog (GitHub API) and the latest "Changes for" section of the file at that commit.'
+          timeout: 30s
+          parameters:
+            - name: branch
+              value: '{$ZBX.CHANGELOG.BRANCH}'
+            - name: bytes
+              value: '{$ZBX.CHANGELOG.READ.BYTES}'
+            - name: path
+              value: '{$ZBX.CHANGELOG.PATH}'
+            - name: proxy
+              value: '{$ZBX.CHANGELOG.HTTP.PROXY}'
+            - name: repo
+              value: '{$ZBX.CHANGELOG.REPO}'
+            - name: token
+              value: '{$GITHUB.API.TOKEN}'
+          tags:
+            - tag: component
+              value: raw
+          triggers:
+            - uuid: 3932c4199d1c4f879d94ee666654afe1
+              expression: 'nodata(/Zabbix ChangeLog by GitHub/zbx.changelog.get,{$ZBX.CHANGELOG.NODATA})=1'
+              name: 'Zabbix ChangeLog: No data from GitHub for {$ZBX.CHANGELOG.NODATA}'
+              priority: WARNING
+              description: 'The ChangeLog could not be read. Check the error of the "Get ChangeLog data" item: network access to GitHub, the HTTP proxy, the token or the API rate limit.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: cb582b931d8c490a8b270172d97bb6f7
+          name: 'GitHub API: request limit'
+          type: DEPENDENT
+          key: zbx.changelog.ratelimit.limit
+          history: 7d
+          description: 'GitHub API requests allowed per hour: 60 without a token, 5000 with a token.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.rate_limit_limit
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: github
+        - uuid: f1a1a52fdf074328aafaa6d3103caa34
+          name: 'GitHub API: requests remaining'
+          type: DEPENDENT
+          key: zbx.changelog.ratelimit.remaining
+          history: 7d
+          description: 'GitHub API requests left in the current hour.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.rate_limit_remaining
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: github
+          triggers:
+            - uuid: 28b4b1f5137942c08d197b4aa480d61b
+              expression: 'last(/Zabbix ChangeLog by GitHub/zbx.changelog.ratelimit.remaining)<{$GITHUB.API.RATELIMIT.MIN}'
+              name: 'Zabbix ChangeLog: GitHub API rate limit is almost exhausted'
+              event_name: 'GitHub API rate limit is almost exhausted: {ITEM.LASTVALUE} requests left'
+              priority: WARNING
+              description: 'Other clients behind the same IP address use the same anonymous limit. Set {$GITHUB.API.TOKEN} or increase {$ZBX.CHANGELOG.INTERVAL}.'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 0a4aa90bcdff4b9e98129ec109216bb1
+          name: 'Latest version: changes'
+          type: DEPENDENT
+          key: zbx.changelog.section
+          history: 90d
+          value_type: TEXT
+          description: 'Text of the latest version section of the ChangeLog.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.section
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: 671a0c0359a3457f90169dd181a60ca6
+          name: 'Last ChangeLog commit SHA'
+          type: DEPENDENT
+          key: zbx.changelog.sha
+          history: 90d
+          value_type: CHAR
+          description: 'Full SHA of the latest commit that changed the ChangeLog.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.sha
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: dd0ef354c58b412f9fd8e76fc4854b84
+          name: 'Last ChangeLog commit URL'
+          type: DEPENDENT
+          key: zbx.changelog.url
+          history: 90d
+          value_type: CHAR
+          description: 'Link to the latest commit on GitHub.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.url
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+        - uuid: a33733d7838948c390fc0a51be36f0aa
+          name: 'Latest version in ChangeLog'
+          type: DEPENDENT
+          key: zbx.changelog.version
+          history: 90d
+          value_type: CHAR
+          description: 'Version of the top "Changes for" section.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.version
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: zbx.changelog.get
+          tags:
+            - tag: component
+              value: changelog
+          triggers:
+            - uuid: 398f8a7f879346948a6d0fb8d8da1932
+              expression: 'change(/Zabbix ChangeLog by GitHub/zbx.changelog.version)=1'
+              recovery_mode: NONE
+              name: 'Zabbix ChangeLog: New version section in {$ZBX.CHANGELOG.REPO}@{$ZBX.CHANGELOG.BRANCH}'
+              event_name: 'New Zabbix version in ChangeLog: {ITEM.VALUE}'
+              url_name: 'ChangeLog on GitHub'
+              url: 'https://github.com/{$ZBX.CHANGELOG.REPO}/blob/{$ZBX.CHANGELOG.BRANCH}/{$ZBX.CHANGELOG.PATH}'
+              priority: WARNING
+              description: 'The top "Changes for" section of the ChangeLog has a new version: a release is being prepared or was published. Close the problem manually after review.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+      tags:
+        - tag: class
+          value: software
+        - tag: target
+          value: github
+        - tag: target
+          value: zabbix
+      macros:
+        - macro: '{$GITHUB.API.RATELIMIT.MIN}'
+          value: '5'
+          description: 'Raise a problem when fewer GitHub API requests than this remain in the current hour.'
+        - macro: '{$GITHUB.API.TOKEN}'
+          type: SECRET_TEXT
+          description: 'Optional GitHub token; raises the API limit from 60 to 5000 requests per hour.'
+        - macro: '{$ZBX.CHANGELOG.BRANCH}'
+          value: master
+          description: 'Branch to follow, for example master or release/8.0.'
+        - macro: '{$ZBX.CHANGELOG.HTTP.PROXY}'
+          description: 'HTTP proxy for requests to GitHub, for example http://proxy.example.com:3128. Empty: no proxy.'
+        - macro: '{$ZBX.CHANGELOG.INTERVAL}'
+          value: 30m
+          description: 'How often GitHub is checked. Every check uses one GitHub API request.'
+        - macro: '{$ZBX.CHANGELOG.NODATA}'
+          value: 3h
+          description: 'Period without data from GitHub after which a problem is raised.'
+        - macro: '{$ZBX.CHANGELOG.PATH}'
+          value: ChangeLog
+          description: 'Path of the ChangeLog file in the repository.'
+        - macro: '{$ZBX.CHANGELOG.READ.BYTES}'
+          value: '65536'
+          description: 'Bytes read from the beginning of the ChangeLog; must include the whole latest "Changes for" section.'
+        - macro: '{$ZBX.CHANGELOG.REPO}'
+          value: zabbix/zabbix
+          description: 'GitHub repository in the "owner/name" format.'
